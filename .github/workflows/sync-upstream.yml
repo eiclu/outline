@@ -1,0 +1,148 @@
+name: Sync upstream
+
+# Keeps this fork up to date with outline/outline. Upstream main is merged into
+# the "upstream-sync" branch on top of the fork's main, and a PR is opened that
+# auto-merges once the required "ci" check passes. Merge conflicts are reported
+# as an issue instead.
+#
+# Requires a SYNC_TOKEN secret: a fine-grained personal access token for this
+# repository with Contents, Pull requests, Issues and Workflows read/write
+# access. The default GITHUB_TOKEN cannot be used because PRs it opens do not
+# trigger CI, and it cannot push upstream changes to workflow files.
+
+on:
+  schedule:
+    # 04:00 UTC daily
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  UPSTREAM_REPO: outline/outline
+  UPSTREAM_BRANCH: main
+  BASE_BRANCH: main
+  SYNC_BRANCH: upstream-sync
+  LABEL: upstream-sync
+
+jobs:
+  sync:
+    if: github.repository != 'outline/outline'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Check token
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::The SYNC_TOKEN secret is not set. See the comment at the top of sync-upstream.yml."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.BASE_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Fetch upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+          gh label create "$LABEL" --color 0E8A16 --description "Automated upstream sync" --force
+
+      - name: Merge upstream
+        id: merge
+        run: |
+          if git merge-base --is-ancestor "upstream/${UPSTREAM_BRANCH}" HEAD; then
+            echo "Already up to date with ${UPSTREAM_REPO}."
+            echo "result=up-to-date" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git checkout -B "$SYNC_BRANCH"
+          UPSTREAM_SHA=$(git rev-parse --short "upstream/${UPSTREAM_BRANCH}")
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+
+          if git merge --no-edit -m "chore: Merge upstream ${UPSTREAM_REPO}@${UPSTREAM_SHA}" "upstream/${UPSTREAM_BRANCH}"; then
+            echo "result=merged" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          {
+            echo "conflicts<<EOF"
+            git diff --name-only --diff-filter=U
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          git merge --abort
+          echo "result=conflict" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update PR
+        if: steps.merge.outputs.result == 'merged'
+        env:
+          UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
+        run: |
+          git push --force origin "$SYNC_BRANCH"
+
+          PR=$(gh pr list --head "$SYNC_BRANCH" --base "$BASE_BRANCH" --state open --json number --jq '.[0].number')
+          if [ -z "$PR" ]; then
+            gh pr create \
+              --head "$SYNC_BRANCH" \
+              --base "$BASE_BRANCH" \
+              --label "$LABEL" \
+              --title "chore: Sync with upstream ${UPSTREAM_REPO}" \
+              --body "Merges the latest changes from [${UPSTREAM_REPO}](https://github.com/${UPSTREAM_REPO}) (\`${UPSTREAM_SHA}\`). This PR merges itself once CI passes. If CI fails, fix the breakage on the \`${SYNC_BRANCH}\` branch."
+            PR=$(gh pr list --head "$SYNC_BRANCH" --base "$BASE_BRANCH" --state open --json number --jq '.[0].number')
+          else
+            gh pr comment "$PR" --body "Updated to upstream \`${UPSTREAM_SHA}\`."
+          fi
+
+          # A merge commit, not a squash, keeps upstream history so later syncs
+          # only merge new changes.
+          gh pr merge "$PR" --auto --merge
+
+          # Close any conflict issue left over from an earlier run.
+          for ISSUE in $(gh issue list --label "$LABEL" --state open --json number --jq '.[].number'); do
+            gh issue close "$ISSUE" --comment "Resolved, upstream merges cleanly again in #${PR}."
+          done
+
+      - name: Report conflicts
+        if: steps.merge.outputs.result == 'conflict'
+        env:
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          BODY=$(cat <<EOF
+          Merging \`${UPSTREAM_REPO}@${UPSTREAM_BRANCH}\` into \`${BASE_BRANCH}\` has conflicts that need to be resolved by hand.
+
+          Conflicting files:
+          $(while read -r FILE; do printf -- '- %s\n' "\`$FILE\`"; done <<< "$CONFLICTS")
+
+          To resolve:
+          \`\`\`bash
+          git remote add upstream https://github.com/${UPSTREAM_REPO}.git  # once
+          git fetch upstream
+          git checkout ${BASE_BRANCH} && git pull
+          git checkout -b ${SYNC_BRANCH}-manual
+          git merge upstream/${UPSTREAM_BRANCH}
+          # resolve conflicts, commit, push and open a PR into ${BASE_BRANCH}
+          \`\`\`
+
+          This issue closes automatically once upstream merges cleanly. Run: ${RUN_URL}
+          EOF
+          )
+
+          # Only one issue is kept open, so daily runs do not add noise.
+          ISSUE=$(gh issue list --label "$LABEL" --state open --json number --jq '.[0].number')
+          if [ -n "$ISSUE" ]; then
+            echo "Conflict already reported in #${ISSUE}."
+            exit 0
+          fi
+          gh issue create --title "Upstream sync has merge conflicts" --label "$LABEL" --body "$BODY"
