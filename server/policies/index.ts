@@ -28,4 +28,5 @@ import "./webhookSubscription";
 import "./userMembership";
 import "./userPasskey";
 import "./emoji";
+import "./pdfTemplate";
 import "./accessRequest";

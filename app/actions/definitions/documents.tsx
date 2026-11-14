@@ -89,6 +89,7 @@ import {
 } from "~/actions/sections";
 import { setPersistedState } from "~/hooks/usePersistedState";
 import history from "~/utils/history";
+import { Hook, PluginManager } from "~/utils/PluginManager";
 import {
   documentHistoryPath,
   homePath,
@@ -1179,11 +1180,14 @@ export const exportDocument = createActionWithChildren({
   section: ActiveDocumentSection,
   icon: <ExportIcon />,
   keywords: "download print pdf markdown html",
-  children: [
+  children: () => [
     downloadDocumentAsMarkdown,
     downloadDocumentAsHTML,
     downloadDocumentAsTextBundle,
     downloadDocumentAsPDF,
+    ...PluginManager.getHooks(Hook.DocumentExport).map(
+      (plugin) => plugin.value
+    ),
     ActionSeparator,
     printDocument,
   ],

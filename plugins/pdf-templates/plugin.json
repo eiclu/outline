@@ -1,0 +1,6 @@
+{
+  "id": "pdf-templates",
+  "name": "PDF Templates",
+  "priority": 50,
+  "description": "Export documents as PDF using uploaded HTML templates."
+}

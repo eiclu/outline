@@ -229,3 +229,11 @@ export const EmojiValidation = {
   /* the characters allowed in the name */
   allowedNameCharacters: /^[a-z0-9_]*$/,
 };
+
+export const PdfTemplateValidation = {
+  /** The maximum length of the template name */
+  maxNameLength: 100,
+
+  /** The maximum length of the template HTML, including inlined assets */
+  maxContentLength: 3 * 1024 * 1024,
+};

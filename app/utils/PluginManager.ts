@@ -11,6 +11,7 @@ import type Integration from "~/models/Integration";
 import type Team from "~/models/Team";
 import type User from "~/models/User";
 import type { LazyComponent } from "~/components/LazyLoad";
+import type { ActionVariant } from "~/types";
 import { useComputed } from "~/hooks/useComputed";
 import Logger from "./Logger";
 import isCloudHosted from "./isCloudHosted";
@@ -24,6 +25,7 @@ export enum Hook {
   Icon = "icon",
   MentionProvider = "mentionProvider",
   InstanceUrl = "instanceUrl",
+  DocumentExport = "documentExport",
 }
 
 /**
@@ -66,6 +68,8 @@ type PluginValueMap = {
       integration: Integration
     ) => MentionType | undefined;
   };
+  /** An additional format in the export menu of the active document. */
+  [Hook.DocumentExport]: ActionVariant;
   [Hook.InstanceUrl]: {
     /** The integration service that this resolver is used for. */
     service: IntegrationService;
