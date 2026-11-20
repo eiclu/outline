@@ -820,7 +820,8 @@ width: 100%;
     }
   }
 
-  &:${hover} {
+  &:${hover},
+  &[${EditorStyleHelper.mentionMenuTarget}] {
     cursor: default;
     background: ${props.theme.mentionHoverBackground};
   }
@@ -873,7 +874,8 @@ width: 100%;
     cursor: pointer;
     vertical-align: top;
 
-    &:${hover} {
+    &:${hover},
+    &[${EditorStyleHelper.mentionMenuTarget}] {
       background: ${props.theme.backgroundSecondary};
     }
 
@@ -894,6 +896,11 @@ width: 100%;
   + img.ProseMirror-separator
   + br.ProseMirror-trailingBreak {
   display: none;
+}
+
+// Keep the cursor hack before cards but out of the flow, so it does not add a line above
+img.ProseMirror-separator:has(+ .component-mention [data-display="card"]) {
+  position: absolute;
 }
 
 .${EditorStyleHelper.suggestionTrigger} {
@@ -1305,6 +1312,11 @@ img.ProseMirror-separator {
 .component-image + img.ProseMirror-separator,
 .component-image + img.ProseMirror-separator + br.ProseMirror-trailingBreak {
   display: none;
+}
+
+// Keep the cursor hack before images but out of the flow, so it does not add a line above
+img.ProseMirror-separator:has(+ .component-image) {
+  position: absolute;
 }
 
 // Let paragraphs of floated images collapse so consecutive floats line up
