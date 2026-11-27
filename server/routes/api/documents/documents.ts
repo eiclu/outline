@@ -280,6 +280,7 @@ router.post(
     // pagination. Only meaningful when the filter targets a single collection.
     let documentIds: string[] = [];
     let collection: Collection | null | undefined;
+    let indexTotal: number | undefined;
     const explicitCollectionId =
       filter !== undefined
         ? extractTopLevelEqValue(filter, "collectionId")
@@ -290,8 +291,14 @@ router.post(
         includeDocumentStructure: true,
       });
       authorize(user, "readDocument", collection);
-      documentIds = (collection.documentStructure || [])
-        .slice(offset, offset + limit)
+      const structure = collection.documentStructure || [];
+      indexTotal = structure.length;
+
+      // One extra id lets client requests detect a next page.
+      documentIds = (
+        direction === "DESC" ? [...structure].reverse() : structure
+      )
+        .slice(offset, offset + limit + 1)
         .map((node) => node.id);
       where[Op.and].push({ id: documentIds });
     }
@@ -402,7 +409,7 @@ router.post(
                 Sequelize.literal(
                   `array_position(ARRAY[:documentIds]::uuid[], "document"."id")`
                 ),
-                direction,
+                "ASC",
               ],
             ]
           : undefined
@@ -437,7 +444,8 @@ router.post(
         }),
       // The membership includes are LEFT JOINs that never filter rows, so
       // the total can be counted without them.
-      () =>
+      async () =>
+        indexTotal ??
         (includeDrafts
           ? Document.unscoped()
           : Document.scope("defaultScope")
@@ -654,15 +662,17 @@ router.post(
       authorize(user, "readDocument", collection);
     }
 
-    const collectionIds = collectionId
-      ? [collectionId]
-      : await user.collectionIds();
     const where: WhereOptions = {
       teamId: user.teamId,
       createdById: user.id,
-      collectionId: {
-        [Op.or]: [{ [Op.in]: collectionIds }, { [Op.is]: null }],
-      },
+      collectionId: collectionId
+        ? collectionId
+        : {
+            [Op.or]: [
+              { [Op.in]: await user.collectionIds() },
+              { [Op.is]: null },
+            ],
+          },
       publishedAt: {
         [Op.is]: null,
       },
@@ -1415,8 +1425,10 @@ router.post(
 
     authorize(user, "update", original);
 
+    let collection: Collection | null = null;
+
     if (collectionId) {
-      const collection = await Collection.findByPk(collectionId, {
+      collection = await Collection.findByPk(collectionId, {
         userId: user.id,
         transaction,
       });
@@ -1427,7 +1439,7 @@ router.post(
 
     const template = await Template.createWithCtx(ctx, {
       editorVersion: original.editorVersion,
-      collectionId,
+      collectionId: collection?.id,
       teamId: user.teamId,
       publishedAt: publish ? new Date() : null,
       lastModifiedById: user.id,
@@ -1580,7 +1592,7 @@ router.post(
 
       // The copy is created in the destination collection, so create permission
       // is required there rather than on the source.
-      if (collection) {
+      if (collectionId || collection) {
         authorize(user, "createDocument", collection);
       }
     }
@@ -1962,7 +1974,7 @@ router.post(
     if (isSelf && !owner) {
       await document.removeOwner(ctx, userId);
       const selfMembership = await UserMembership.findOne({
-        where: { documentId: id, userId },
+        where: { documentId: document.id, userId },
         transaction,
       });
 
@@ -1983,7 +1995,7 @@ router.post(
       await document.addOwner(ctx, userId);
 
       const membership = await UserMembership.findOne({
-        where: { documentId: id, userId },
+        where: { documentId: document.id, userId },
         transaction,
         rejectOnEmpty: true,
       });
@@ -2020,7 +2032,7 @@ router.post(
     );
 
     let membership = await UserMembership.findOneForUpdate(
-      { documentId: id, userId },
+      { documentId: document.id, userId },
       { transaction }
     );
 
@@ -2034,7 +2046,7 @@ router.post(
     } else {
       membership = await UserMembership.create(
         {
-          documentId: id,
+          documentId: document.id,
           userId,
           index,
           permission: permission || user.defaultDocumentPermission,
@@ -2093,7 +2105,7 @@ router.post(
 
     const membership = await UserMembership.findOne({
       where: {
-        documentId: id,
+        documentId: document.id,
         userId,
       },
       transaction,
@@ -2142,7 +2154,7 @@ router.post(
     authorize(user, "read", group);
 
     let membership = await GroupMembership.findOneForUpdate(
-      { documentId: id, groupId },
+      { documentId: document.id, groupId },
       { transaction }
     );
 
@@ -2156,7 +2168,7 @@ router.post(
     } else {
       membership = await GroupMembership.create(
         {
-          documentId: id,
+          documentId: document.id,
           groupId,
           permission: permission ?? DocumentPermission.ReadWrite,
           createdById: user.id,
@@ -2200,13 +2212,19 @@ router.post(
 
     const membership = await GroupMembership.findOne({
       where: {
-        documentId: id,
+        documentId: document.id,
         groupId,
       },
       transaction,
       lock: transaction.LOCK.NO_KEY_UPDATE,
       rejectOnEmpty: true,
     });
+
+    if (membership.sourceId) {
+      throw ValidationError(
+        "Cannot remove access that is inherited from a parent document"
+      );
+    }
 
     await membership.destroy(toHookContext(ctx));
 
@@ -2229,7 +2247,7 @@ router.post(
     authorize(actor, "update", document);
 
     let where: WhereOptions<UserMembership> = {
-      documentId: id,
+      documentId: document.id,
     };
     let userWhere;
 
@@ -2289,7 +2307,7 @@ router.post(
     authorize(user, "update", document);
 
     let where: WhereOptions<GroupMembership> = {
-      documentId: id,
+      documentId: document.id,
     };
     let groupWhere;
 
@@ -2356,17 +2374,27 @@ router.post(
         deletedAt: {
           [Op.ne]: null,
         },
-        [Op.or]: [
+        [Op.and]: [
           {
-            collectionId: {
-              [Op.in]: collectionIds,
-            },
+            [Op.or]: [
+              {
+                collectionId: {
+                  [Op.in]: collectionIds,
+                },
+              },
+              {
+                createdById: user.id,
+                collectionId: {
+                  [Op.is]: null,
+                },
+              },
+            ],
           },
           {
-            createdById: user.id,
-            collectionId: {
-              [Op.is]: null,
-            },
+            [Op.or]: [
+              { publishedAt: { [Op.ne]: null } },
+              ...(await draftVisibilityClauses(user)),
+            ],
           },
         ],
       },
