@@ -40,6 +40,7 @@ import { DocumentHelper } from "@server/models/helpers/DocumentHelper";
 import HTMLHelper from "@server/models/helpers/HTMLHelper";
 import { ProsemirrorHelper } from "@server/models/helpers/ProsemirrorHelper";
 import DocumentImportTask from "@server/queues/tasks/DocumentImportTask";
+import EmptyTrashTask from "@server/queues/tasks/EmptyTrashTask";
 import { sequelize } from "@server/storage/database";
 import FileStorage from "@server/storage/files";
 import {
@@ -1359,6 +1360,49 @@ describe("#documents.list", () => {
     expect(body3.data).toHaveLength(5);
     expect(body3.data[0].id).toEqual(expectedOrder[20].id);
     expect(body3.data[4].id).toEqual(expectedOrder[24].id);
+  });
+
+  it("should return total and page from the end with collection index sort", async () => {
+    const user = await buildUser();
+    const collection = await buildCollection({
+      userId: user.id,
+      teamId: user.teamId,
+    });
+    for (let i = 0; i < 25; i++) {
+      await buildDocument({
+        userId: user.id,
+        collectionId: collection.id,
+        teamId: user.teamId,
+      });
+    }
+    await collection.reload();
+    const structureIds = (collection.documentStructure ?? []).map(
+      (node) => node.id
+    );
+    const body = { collectionId: collection.id, sort: "index", limit: 10 };
+
+    const res = await server.post("/api/documents.list", user, {
+      body: { ...body, direction: "ASC" },
+    });
+    const json = await res.json();
+    expect(res.status).toEqual(200);
+    expect(json.pagination.total).toEqual(25);
+
+    const clientRes = await server.post("/api/documents.list", user, {
+      body: { ...body, direction: "ASC" },
+      headers: { "x-client-version": "1" },
+    });
+    const clientJson = await clientRes.json();
+    expect(clientJson.data).toHaveLength(10);
+    expect(clientJson.pagination.total).toEqual(11);
+
+    const descRes = await server.post("/api/documents.list", user, {
+      body: { ...body, direction: "DESC" },
+    });
+    const descJson = await descRes.json();
+    expect(descJson.data.map((doc: { id: string }) => doc.id)).toEqual(
+      structureIds.slice(15).reverse()
+    );
   });
 
   it("should allow filtering by collection", async () => {
@@ -2898,6 +2942,32 @@ describe("#documents.drafts", () => {
     const body = await res.json();
     expect(res.status).toEqual(200);
     expect(body.data.length).toEqual(drafts.length);
+  });
+
+  it("should only return drafts in the given collection", async () => {
+    const user = await buildUser();
+    const collection = await buildCollection({
+      userId: user.id,
+      teamId: user.teamId,
+    });
+    const document = await buildDraftDocument({
+      userId: user.id,
+      collectionId: collection.id,
+      teamId: user.teamId,
+    });
+    await buildDraftDocument({
+      userId: user.id,
+      collectionId: null,
+      teamId: user.teamId,
+    });
+
+    const res = await server.post("/api/documents.drafts", user, {
+      body: { collectionId: collection.id },
+    });
+    const body = await res.json();
+    expect(res.status).toEqual(200);
+    expect(body.data.length).toEqual(1);
+    expect(body.data[0].id).toEqual(document.id);
   });
 
   it("should not return drafts in private collections not a member of", async () => {
@@ -9675,6 +9745,55 @@ describe("#documents.remove_group", () => {
 
     expect(res.status).toEqual(404);
   });
+
+  it("should not remove group with access inherited from a parent", async () => {
+    const user = await buildUser();
+    const collection = await buildCollection({
+      teamId: user.teamId,
+      createdById: user.id,
+      permission: null,
+    });
+    const parentDocument = await buildDocument({
+      collectionId: collection.id,
+      createdById: user.id,
+      teamId: user.teamId,
+    });
+    const document = await buildDocument({
+      collectionId: collection.id,
+      parentDocumentId: parentDocument.id,
+      createdById: user.id,
+      teamId: user.teamId,
+    });
+    const group = await buildGroup({
+      teamId: user.teamId,
+    });
+    const sourceMembership = await GroupMembership.create({
+      createdById: user.id,
+      documentId: parentDocument.id,
+      groupId: group.id,
+      permission: DocumentPermission.ReadWrite,
+    });
+    await GroupMembership.create({
+      createdById: user.id,
+      documentId: document.id,
+      groupId: group.id,
+      permission: DocumentPermission.ReadWrite,
+      sourceId: sourceMembership.id,
+    });
+
+    const res = await server.post("/api/documents.remove_group", user, {
+      body: {
+        id: document.id,
+        groupId: group.id,
+      },
+    });
+    expect(res.status).toEqual(400);
+    expect(
+      await GroupMembership.count({
+        where: { documentId: document.id, groupId: group.id },
+      })
+    ).not.toEqual(0);
+  });
 });
 
 describe("#documents.memberships", () => {
@@ -9766,6 +9885,24 @@ describe("#documents.duplicate", () => {
   it("should require authentication", async () => {
     const res = await server.post("/api/documents.duplicate");
     expect(res.status).toEqual(401);
+  });
+
+  it("should fail with status 403 for an unknown collectionId", async () => {
+    const user = await buildUser();
+    const document = await buildDocument({
+      userId: user.id,
+      teamId: user.teamId,
+    });
+
+    const res = await server.post("/api/documents.duplicate", user, {
+      body: {
+        id: document.id,
+        collectionId: faker.string.uuid(),
+        publish: true,
+      },
+    });
+
+    expect(res.status).toEqual(403);
   });
 
   it("should duplicate a document with fullWidth property", async () => {
@@ -10124,6 +10261,30 @@ describe("#documents.empty_trash", () => {
     const body = await res.json();
     expect(res.status).toEqual(403);
     expect(body).toMatchSnapshot();
+  });
+  it("should not delete trashed drafts of other collection members", async () => {
+    const admin = await buildAdmin();
+    const other = await buildUser({ teamId: admin.teamId });
+    const collection = await buildCollection({ teamId: admin.teamId });
+    const otherDraft = await buildDraftDocument({
+      userId: other.id,
+      teamId: admin.teamId,
+      collectionId: collection.id,
+    });
+    const otherDocument = await buildDocument({
+      userId: other.id,
+      teamId: admin.teamId,
+      collectionId: collection.id,
+    });
+    await withContext(other, (ctx) => otherDraft.destroyWithCtx(ctx));
+    await withContext(other, (ctx) => otherDocument.destroyWithCtx(ctx));
+    const schedule = vi.spyOn(EmptyTrashTask.prototype, "schedule");
+
+    const res = await server.post("/api/documents.empty_trash", admin);
+    expect(res.status).toEqual(200);
+    expect(schedule).toHaveBeenCalledWith({
+      documentIds: [otherDocument.id],
+    });
   });
 });
 

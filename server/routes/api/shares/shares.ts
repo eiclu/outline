@@ -105,7 +105,7 @@ router.post(
         data: {
           shares: [
             presentShare(share, {
-              isAdmin: user?.isAdmin ?? false,
+              isAdmin: !!user?.isAdmin && user.teamId === share.teamId,
               isPublic: cannot(user, "read", share),
             }),
           ],
@@ -171,9 +171,18 @@ router.post(
       "$collection.teamId$": user.teamId,
     };
 
-    const documentWhere: WhereAttributeHash<Share> = {
+    const documentWhere: WhereAttributeHash<Share> & {
+      [Op.or]?: WhereOptions<Share>[];
+    } = {
       "$document.teamId$": user.teamId,
-      "$document.collectionId$": collectionIds,
+      [Op.or]: [
+        { "$document.collectionId$": collectionIds },
+        // Drafts without a collection can be shared publicly too.
+        {
+          "$document.collectionId$": null,
+          ...(user.isAdmin ? {} : { "$document.createdById$": user.id }),
+        },
+      ],
     };
 
     if (query) {
@@ -214,7 +223,8 @@ router.post(
         {
           // Memberships are needed to compute the share policies.
           model: Document.scope([
-            "defaultScope",
+            "withDrafts",
+            "withoutContent",
             { method: ["withMembership", user.id] },
           ]),
           required: false,
@@ -302,10 +312,10 @@ router.post(
       authorize(user, "read", collection);
     }
 
-    const [share] = await Share.findOrCreateWithCtx(ctx, {
+    const [share, created] = await Share.findOrCreateWithCtx(ctx, {
       where: {
-        collectionId: collectionId ?? null,
-        documentId: documentId ?? null,
+        collectionId: collection?.id ?? null,
+        documentId: document?.id ?? null,
         teamId: user.teamId,
         revokedAt: null,
       },
@@ -323,6 +333,22 @@ router.post(
       },
     });
 
+    share.team = user.team;
+    share.collection = collection;
+    share.document = document;
+
+    // Defaults only apply to new rows, so publish an existing share explicitly.
+    if (!created && published && !share.published) {
+      authorize(user, "share", user.team);
+      authorize(user, "update", share);
+      share.published = true;
+      share.includeChildDocuments = true;
+      if (expiresAt !== undefined) {
+        share.expiresAt = expiresAt;
+      }
+      await share.saveWithCtx(ctx);
+    }
+
     if (share.published) {
       authorize(user, "share", user.team);
       if (document) {
@@ -333,10 +359,10 @@ router.post(
       }
     }
 
-    share.team = user.team;
-    share.user = user;
-    share.collection = collection;
-    share.document = document;
+    // An existing share already loads its creator through the default scope.
+    if (created) {
+      share.user = user;
+    }
 
     ctx.body = {
       data: presentShare(share),
