@@ -45,7 +45,7 @@ export class RedisPrefixHelper {
    * @returns the cache key string.
    */
   public static getShareContentKey(id: string, updatedAt: Date) {
-    return `share:html:${id}:${updatedAt.getTime()}`;
+    return `share:html:v2:${id}:${updatedAt.getTime()}`;
   }
 
   /**
@@ -67,16 +67,6 @@ export class RedisPrefixHelper {
    */
   public static getUserCollectionIdsKey(userId: string) {
     return `uc:${userId}`;
-  }
-
-  /**
-   * Gets key for caching the document IDs a user is a member of.
-   *
-   * @param userId The user ID to generate a key for.
-   * @returns the cache key string.
-   */
-  public static getUserMembershipDocumentIdsKey(userId: string) {
-    return `ud:${userId}`;
   }
 
   /**
